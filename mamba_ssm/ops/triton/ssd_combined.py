@@ -953,10 +953,13 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
     @custom_fwd(device_type="cuda")
     def forward(ctx, zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states=None, seq_idx=None, dt_limit=(0.0, float("inf")), return_final_states=False, activation="silu",
                 rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None, headdim=None,
-                ngroups=1, norm_before_gate=True):
+                ngroups=1, norm_before_gate=True, process_group=None):
         assert activation in [None, "silu", "swish"]
 
-        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
+        rank = dist.get_rank()
+        group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
+        lb = 0 if rank==group_ranks[0] else conv1d_weight.shape[1] - 1 #Added for context parallel
+
         if D.dim() == 1:
             assert headdim is not None
             nheads, = D.shape
@@ -976,7 +979,6 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
         seqlen -= lb #context parallel
-        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
         xBC_conv = rearrange(
             causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
@@ -990,13 +992,17 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         C = rearrange(C, "b l (g n) -> b l g n", g=ngroups)
         z = rearrange(z, "b l (h p) -> b l h p", h=nheads) if z is not None else None
         if rmsnorm_weight is None:
-            out, out_x, dt_out, dA_cumsum, states, final_states = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size=chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx, dt_softplus=True, dt_limit=dt_limit)
+            out, out_x, dt_out, dA_cumsum, states, final_states = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C,
+                chunk_size=chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx,
+                dt_softplus=True, dt_limit=dt_limit, process_group=process_group)
             out = rearrange(out, "b s h p -> b s (h p)")
             rstd = None
             if d_nonssm > 0:
                 out = torch.cat([_swiglu_fwd(zx0), out], dim=-1)
         else:
-            out_x, _, dt_out, dA_cumsum, states, final_states = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size=chunk_size, D=D, z=None, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx, dt_softplus=True, dt_limit=dt_limit)
+            out_x, _, dt_out, dA_cumsum, states, final_states = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C,
+                chunk_size=chunk_size, D=D, z=None, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx,
+                dt_softplus=True, dt_limit=dt_limit, process_group=process_group)
             # reshape input data into 2D tensor
             x_rms = rearrange(out_x, "b s h p -> (b s) (h p)")
             z_rms = rearrange(z, "b s h p -> (b s) (h p)")
@@ -1033,6 +1039,8 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         ctx.chunk_size = chunk_size
         ctx.headdim = headdim
         ctx.ngroups = ngroups
+        ctx.process_group = process_group #This is the process group vs the mamba group ranks
+        ctx.rank = rank #CP added
         return out if not return_final_states else (out, final_states)
 
     @staticmethod
@@ -1053,7 +1061,10 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out0_recompute, out1_recompute = out_recompute.split([d_nonssm, dim], dim=-1)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
-        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
+
+        #FIXME the process group handling could be passed a list of group ranks (or tensor of ranks) instead of a process group
+        group_ranks = dist.get_process_group_ranks(ctx.process_group) if ctx.process_group else list(range(dist.get_world_size()))
+        lb = 0 if ctx.rank == group_ranks[0] else conv1d_weight.shape[1] - 1 #Added for context parallel
         zx0, z, dt = zx0[:,lb:], z[:,lb:], dt[:,lb:] # Context parallel
         #torch.save(z,f'z_{dist.get_rank()}.pt')
         xBC_conv = rearrange(
@@ -1126,8 +1137,10 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out_for_linear = out_recompute if recompute_output else None
             dout = rearrange(dout, "(b s) (h p) -> b s h p", b=batch, p=headdim)
             dx, ddt, dA, dB, dC, dD, _, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(
-                dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=None, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=True, dt_limit=ctx.dt_limit, dx=dx, ddt=ddt_given, dB=dB, dC=dC
-            )            #TODO - dx, dB, dC, and ddt here don't directly write into xdzbcdt so needs to be copied later
+                dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=None, dt_bias=dt_bias, initial_states=initial_states,
+                dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=True, dt_limit=ctx.dt_limit, dx=dx,
+                ddt=ddt_given, dB=dB, dC=dC
+            ) #TODO - dx, dB, dC, and ddt here don't directly write into xdzbcdt so needs to be copied later
 
             #for k,v in {'dx':dx,'dA':dA,'dB':dB,'dC':dC,'dxBC_p':dxBC
             #        }.items():
@@ -1160,10 +1173,14 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #torch.save(dxBC,f'dxBC_{dist.get_rank()}.pt')
         #torch.save(dxBC_given,f'dxBC_given_{dist.get_rank()}.pt')
         #torch.save(dzxbcdt,f'dzxbcdt_{dist.get_rank()}.pt')
-        return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
+        return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, \
+               None, doutproj_weight, doutproj_bias, None, None, None
 
 
-def mamba_split_conv1d_scan_combined(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states=None, seq_idx=None, dt_limit=(0.0, float("inf")), return_final_states=False, activation="silu", rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None, headdim=None, ngroups=1, norm_before_gate=True):
+def mamba_split_conv1d_scan_combined(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states=None,
+                                     seq_idx=None, dt_limit=(0.0, float("inf")), return_final_states=False, activation="silu",
+                                     rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None,
+                                     headdim=None, ngroups=1, norm_before_gate=True):
     """
     Argument:
         zxbcdt: (batch, seqlen, 2 * dim + 2 * ngroups * dstate + nheads) where dim == nheads * headdim
@@ -1182,7 +1199,10 @@ def mamba_split_conv1d_scan_combined(zxbcdt, conv1d_weight, conv1d_bias, dt_bias
     Return:
         out: (batch, seqlen, dim)
     """
-    return MambaSplitConv1dScanCombinedFn.apply(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states, seq_idx, dt_limit, return_final_states, activation, rmsnorm_weight, rmsnorm_eps, outproj_weight, outproj_bias, headdim, ngroups, norm_before_gate)
+    return MambaSplitConv1dScanCombinedFn.apply(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size,
+                                                initial_states, seq_idx, dt_limit, return_final_states, activation,
+                                                rmsnorm_weight, rmsnorm_eps, outproj_weight, outproj_bias, headdim,
+                                                ngroups, norm_before_gate)
 
 
 def mamba_split_conv1d_scan_ref(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, dt_limit=(0.0, float("inf")), activation="silu", rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None, headdim=None, ngroups=1, norm_before_gate=True):
