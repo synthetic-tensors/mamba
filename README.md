@@ -1,3 +1,7 @@
+# Syntensor Mamba Fork
+
+This is forked mainly to run Mamba 2 in Context Parallel mode
+
 # Mamba
 
 ![Mamba](assets/selection.png "Selective State Space")
