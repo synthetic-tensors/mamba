@@ -270,6 +270,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 **dt_limit_kwargs,
                 return_final_states=ssm_state is not None,
                 return_varlen_states=cu_seqlens is not None and inference_params is not None,
+                process_group=self.process_group,
             )
             if ssm_state is not None:
                 y, last_state, *rest = y

@@ -322,7 +322,9 @@ def gather():
 
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
-def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
+def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None,
+                                   seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")),
+                                   process_group=None):
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
@@ -378,16 +380,17 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     if world_size > 1:
         rank = dist.get_rank()
-        if rank == 0:
+        group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
+        if rank == group_ranks[0]:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-        dist.barrier()
+        #dist.barrier()
         #print('passing states sequentially multi-gpu')
-        for rank1, rank2 in zip(range(world_size-1),range(1,world_size)):
+        for rank1, rank2 in zip(group_ranks[:-1], group_ranks[1:]):
             #print(f"{rank} - {rank1} - {rank2}")
-            if rank in [rank1,rank2]:
+            if rank in [rank1, rank2]:
                 #print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
-                    final_states = torch.zeros_like(states[:,-1])
+                    final_states = torch.zeros_like(states[:, -1])
                 initial_states = _transfer(final_states, rank1, rank2)
             if rank == rank2:
                 #print(f"state passing {rank2}")
@@ -416,7 +419,8 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
 def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None, z=None,
                                    dt_bias=None, initial_states=None, dfinal_states=None, seq_idx=None, dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
-                                   dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False):
+                                   dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False,
+                                   process_group=None):
     #print('chunk_scan_combined_bwd')
     if dout.stride(-1) != 1:
         dout = dout.contiguous()
@@ -474,11 +478,12 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     if world_size > 1:
         rank = dist.get_rank()
-        if rank == 0:
+        group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
+        if rank == group_ranks[0]:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-        dist.barrier()
+        #dist.barrier()
         # print('passing states sequentially multi-gpu')
-        for rank1, rank2 in zip(range(world_size - 1), range(1, world_size)):
+        for rank1, rank2 in zip(group_ranks[1:], group_ranks[:-1]):
             # print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
                 # print(f"transfer {rank1}:{rank2}")
@@ -540,11 +545,12 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     if world_size > 1:
         rank = dist.get_rank()
-        if rank == world_size-1:
+        group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
+        if rank == group_ranks[-1]:
             states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
-        dist.barrier()
+        #dist.barrier()
         # print('passing states sequentially multi-gpu')
-        for rank1, rank2 in zip(range(world_size - 1,0,-1), range(world_size-2,-1,-1)):
+        for rank1, rank2 in zip(group_ranks[-1:0:-1], group_ranks[-2::-1]):
             #print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
                 #print(f"transfer {rank1}:{rank2}")
@@ -709,19 +715,25 @@ def selective_scan_bwd(dout, x, dt, A, B, C, D=None, z=None):
 class MambaChunkScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False, return_varlen_states=False):
+    def forward(ctx, x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None,
+                cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False,
+                return_varlen_states=False, process_group=None):
         ctx.dt_dtype = dt.dtype
         if not return_varlen_states:
             cu_seqlens = None
         else:
             assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
-        out, out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx, cu_seqlens=cu_seqlens, dt_softplus=dt_softplus, dt_limit=dt_limit)
-        ctx.save_for_backward(out if z is None else out_x, x, dt, dA_cumsum, A, B, C, D, z, dt_bias, initial_states, seq_idx)
+        out, out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C,
+            chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens, dt_softplus=dt_softplus, dt_limit=dt_limit, process_group=process_group)
+        ctx.save_for_backward(out if z is None else out_x, x, dt, dA_cumsum, A, B, C, D, z, dt_bias, initial_states,
+                              seq_idx)
         ctx.dt_softplus = dt_softplus
         ctx.chunk_size = chunk_size
         ctx.dt_limit = dt_limit
         ctx.return_final_states = return_final_states
         ctx.return_varlen_states = return_varlen_states
+        ctx.process_group = process_group
         if not return_varlen_states:
             return out if not return_final_states else (out, final_states)
         else:
@@ -733,11 +745,15 @@ class MambaChunkScanCombinedFn(torch.autograd.Function):
         out, x, dt, dA_cumsum, A, B, C, D, z, dt_bias, initial_states, seq_idx = ctx.saved_tensors
         assert not ctx.return_varlen_states, "return_varlen_states is not supported in backward"
         dfinal_states = args[0] if ctx.return_final_states else None
-        dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=ctx.dt_softplus, dt_limit=ctx.dt_limit)
-        return dx, ddt, dA, dB, dC, None, dD, dz, ddt_bias, dinitial_states, None, None, None, None, None, None
+        dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C,
+            out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states,
+            seq_idx=seq_idx, dt_softplus=ctx.dt_softplus, dt_limit=ctx.dt_limit, process_group=ctx.process_group)
+        return dx, ddt, dA, dB, dC, None, dD, dz, ddt_bias, dinitial_states, None, None, None, None, None, None, None
 
 
-def mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False, return_varlen_states=False):
+def mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None,
+                              cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False,
+                              return_varlen_states=False, process_group=None):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -756,7 +772,9 @@ def mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bia
     Return:
         out: (batch, seqlen, nheads, headdim)
     """
-    return MambaChunkScanCombinedFn.apply(x, dt, A, B, C, chunk_size, D, z, dt_bias, initial_states, seq_idx, cu_seqlens, dt_softplus, dt_limit, return_final_states, return_varlen_states)
+    return MambaChunkScanCombinedFn.apply(x, dt, A, B, C, chunk_size, D, z, dt_bias, initial_states, seq_idx,
+                                          cu_seqlens, dt_softplus, dt_limit, return_final_states, return_varlen_states,
+                                          process_group)
 
 
 def mamba_chunk_scan(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, dt_softplus=False):
