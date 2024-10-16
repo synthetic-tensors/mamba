@@ -3,9 +3,11 @@ import pandas as pd
 from mamba_ssm import Mamba2
 import torch
 import torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
+
 #import torch.distributed.autograd as dist_autograd
 #from einops import rearrange
 if not dist.is_available():
@@ -96,6 +98,7 @@ parser.add_argument("--random_seed", type=int)
 parser.add_argument("--batch_size", type=int)
 parser.add_argument("--iterations", type=int)
 parser.add_argument("--num_layers", type=int)
+parser.add_argument("--fsdp", type=int)
 args = parser.parse_args()
 print(args)
 torch.manual_seed(args.random_seed)
@@ -103,7 +106,13 @@ num_gpus = args.nproc_per_node
 num_layers = args.num_layers
 batch = args.batch_size
 iterations = args.iterations
-mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
+#mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
+device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(args.fdsp, num_gpus//args.fsdp), mesh_dim_names=('dp','cp'))
+cp_mesh, dp_mesh = device_mesh['cp'], device_mesh['dp']
+print(cp_mesh, dp_mesh)
+print(dist.get_group())
+print(dist.get_rank(group=dist.get_group))
+exit()
 #print(mesh_1d.get_group().bound_device_id)
 #if dist.get_rank() == 0:
     #N.B. must use contiguous when splitting tensors for distributed ops!
@@ -141,6 +150,9 @@ for _ in range(num_layers):
 model = nn.Sequential(*layers).cuda()
 if dist.get_rank() == 0:
     print(model)
+
+# Init FSDP using the dp device mesh
+sharded_model = FSDP(model, device_mesh=dp_mesh, use_orig_params=True)
 
 for s in range(12,13):
     length = 2**s
