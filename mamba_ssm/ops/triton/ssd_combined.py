@@ -483,15 +483,15 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
         #dist.barrier()
         # print('passing states sequentially multi-gpu')
-        for rank1, rank2 in zip(group_ranks[1:], group_ranks[:-1]):
-            # print(f"{rank} - {rank1} - {rank2}")
+        for rank1, rank2 in zip(group_ranks[:-1], group_ranks[1:]):
+            print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
-                # print(f"transfer {rank1}:{rank2}")
+                print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     final_states = torch.zeros_like(states[:, -1])
                 initial_states = _transfer(final_states, rank1, rank2)
             if rank == rank2:
-                # print(f"state passing {rank2}")
+                print(f"state passing {rank2}")
                 states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size,
                                                                C)
             dist.barrier()
@@ -547,7 +547,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         rank = dist.get_rank()
         group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
         if rank == group_ranks[-1]:
-            states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
+            sMambaSplitConv1dScanCombinedFnBackwardtates, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
         #dist.barrier()
         # print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(group_ranks[-1:0:-1], group_ranks[-2::-1]):
@@ -1174,13 +1174,13 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #torch.save(dxBC_given,f'dxBC_given_{dist.get_rank()}.pt')
         #torch.save(dzxbcdt,f'dzxbcdt_{dist.get_rank()}.pt')
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, \
-               None, doutproj_weight, doutproj_bias, None, None, None
+               None, doutproj_weight, doutproj_bias, None, None, None, None
 
 
 def mamba_split_conv1d_scan_combined(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states=None,
                                      seq_idx=None, dt_limit=(0.0, float("inf")), return_final_states=False, activation="silu",
                                      rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None,
-                                     headdim=None, ngroups=1, norm_before_gate=True):
+                                     headdim=None, ngroups=1, norm_before_gate=True, process_group=None):
     """
     Argument:
         zxbcdt: (batch, seqlen, 2 * dim + 2 * ngroups * dstate + nheads) where dim == nheads * headdim
@@ -1202,7 +1202,7 @@ def mamba_split_conv1d_scan_combined(zxbcdt, conv1d_weight, conv1d_bias, dt_bias
     return MambaSplitConv1dScanCombinedFn.apply(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size,
                                                 initial_states, seq_idx, dt_limit, return_final_states, activation,
                                                 rmsnorm_weight, rmsnorm_eps, outproj_weight, outproj_bias, headdim,
-                                                ngroups, norm_before_gate)
+                                                ngroups, norm_before_gate, process_group)
 
 
 def mamba_split_conv1d_scan_ref(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, dt_limit=(0.0, float("inf")), activation="silu", rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None, headdim=None, ngroups=1, norm_before_gate=True):

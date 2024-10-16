@@ -79,7 +79,7 @@ class SequenceParallelMixerFn(Function):
         receive_from_rank = _next(rank, group_ranks) if rank != group_ranks[-1] else None
         send_to_rank = _prev(rank, group_ranks) if rank != group_ranks[0] else None
         pre_tokens_grad = grad_x[:,:ctx.padding].contiguous()
-        if rank > 0:
+        if rank !=ctx.group_ranks[0]:
             grad_x_out = grad_x[:,ctx.padding:].contiguous()
         else:
             grad_x_out = grad_x.clone()
@@ -91,11 +91,12 @@ class SequenceParallelMixerFn(Function):
         return grad_x_out, None, None
 
 class SequenceParallelMixerLayer(nn.Module):
-    def __init__(self, padding = 0):
+    def __init__(self, padding = 0, process_group = None):
         super(SequenceParallelMixerLayer, self).__init__()
         self.padding = padding
+        self.process_group = process_group
     def forward(self,x):
-        return SequenceParallelMixerFn.apply(x, self.padding)
+        return SequenceParallelMixerFn.apply(x, self.padding, self.process_group)
 
 
 parser = argparse.ArgumentParser()
@@ -156,7 +157,7 @@ layers = []
 for _ in range(num_layers):
     mamba_layer = Mamba2(256,cp_group=cp_mesh.get_group())
     padding = mamba_layer.d_conv - 1
-    layers.append(SequenceParallelMixerLayer(padding))
+    layers.append(SequenceParallelMixerLayer(padding, cp_mesh.get_group()))
     layers.append(mamba_layer)
 model = nn.Sequential(*layers).cuda()
 if dist.get_rank() == 0:
@@ -186,7 +187,7 @@ for s in range(12,13):
         input_tensor = sequence[rank][i].cuda().contiguous()
         #with torch.autograd.profiler.profile(use_cuda=True) as prof:
         start.record()
-        output = model(input_tensor)
+        output = sharded_model(input_tensor)
         end.record()
         torch.cuda.synchronize()
         r = torch.cuda.memory_reserved(rank)

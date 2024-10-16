@@ -67,6 +67,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         use_mem_eff_path=True,
         layer_idx=None,  # Absorb kwarg for general module
         process_group=None,
+        cp_group=None,
         sequence_parallel=True,
         device=None,
         dtype=None,
@@ -79,6 +80,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.conv_init = conv_init
         self.expand = expand
         self.process_group = process_group
+        self.cp_group = cp_group
         self.sequence_parallel = sequence_parallel
         self.world_size = 1 if process_group is None else process_group.size()
         self.local_rank = 0 if process_group is None else process_group.rank()
@@ -210,7 +212,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 headdim=None if self.D_has_hdim else self.headdim,
                 ngroups=self.ngroups,
                 norm_before_gate=self.norm_before_gate,
-                process_group=self.process_group
+                process_group=self.cp_group,
                 **dt_limit_kwargs,
             )
             if seqlen_og is not None:
@@ -270,7 +272,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 **dt_limit_kwargs,
                 return_final_states=ssm_state is not None,
                 return_varlen_states=cu_seqlens is not None and inference_params is not None,
-                process_group=self.process_group,
+                process_group=self.cp_group,
             )
             if ssm_state is not None:
                 y, last_state, *rest = y
