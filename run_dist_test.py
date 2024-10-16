@@ -93,12 +93,12 @@ parser = argparse.ArgumentParser()
 #parser.add_argument("--local_rank", type=int)
 # These are your own arguments
 #parser.add_argument("--master_addr", type=str)
+parser.add_argument("--fsdp", type=int)
 parser.add_argument("--nproc_per_node", type=int)
 parser.add_argument("--random_seed", type=int)
 parser.add_argument("--batch_size", type=int)
 parser.add_argument("--iterations", type=int)
 parser.add_argument("--num_layers", type=int)
-parser.add_argument("--fsdp", type=int)
 args = parser.parse_args()
 print(args)
 torch.manual_seed(args.random_seed)
@@ -107,12 +107,13 @@ num_layers = args.num_layers
 batch = args.batch_size
 iterations = args.iterations
 #mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
-device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(args.fdsp, num_gpus//args.fsdp), mesh_dim_names=('dp','cp'))
+device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(args.fsdp, num_gpus//args.fsdp), mesh_dim_names=('dp','cp'))
 cp_mesh, dp_mesh = device_mesh['cp'], device_mesh['dp']
-print(cp_mesh, dp_mesh)
-print(dist.get_group())
-print(dist.get_rank(group=dist.get_group))
-exit()
+print(dist.get_rank(),cp_mesh, dist.get_process_group_ranks(cp_mesh.get_group()))
+print(dist.get_rank(),dp_mesh, dist.get_process_group_ranks(dp_mesh.get_group()))
+#print(dist.get_rank(), device_mesh.get_group(mesh_dim='dp'),device_mesh.get_group(mesh_dim='cp'))
+#print(dist.get_group())
+#print(dist.get_rank(group=dist.get_group))
 #print(mesh_1d.get_group().bound_device_id)
 #if dist.get_rank() == 0:
     #N.B. must use contiguous when splitting tensors for distributed ops!
@@ -143,7 +144,7 @@ res_forward = list()
 res_backward = list()
 layers = []
 for _ in range(num_layers):
-    mamba_layer = Mamba2(256)
+    mamba_layer = Mamba2(256,cp_group=cp_mesh.get_group())
     padding = mamba_layer.d_conv - 1
     layers.append(SequenceParallelMixerLayer(padding))
     layers.append(mamba_layer)

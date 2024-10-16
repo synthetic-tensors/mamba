@@ -210,6 +210,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 headdim=None if self.D_has_hdim else self.headdim,
                 ngroups=self.ngroups,
                 norm_before_gate=self.norm_before_gate,
+                process_group=self.process_group
                 **dt_limit_kwargs,
             )
             if seqlen_og is not None:
