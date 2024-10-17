@@ -5,7 +5,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import torch.distributed as dist
 from einops import rearrange, repeat
 
 try:
@@ -71,9 +71,11 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         sequence_parallel=True,
         device=None,
         dtype=None,
+        tag=None,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        self.tag = tag
         self.d_model = d_model
         self.d_state = d_state
         self.d_conv = d_conv
@@ -168,7 +170,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
-        #print("Forward")
+        print(f"Forward {dist.get_rank()} running layer {self.tag}")
         seqlen_og = seqlen
         if seqlen is None:
             batch, seqlen, dim = u.shape

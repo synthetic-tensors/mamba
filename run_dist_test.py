@@ -39,32 +39,42 @@ def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
 
 class SequenceParallelMixerFn(Function):
     @staticmethod
-    def forward(ctx, x, padding=0, process_group=None):
+    def forward( x, padding=0, process_group=None):
         #Prepends the last n_padding tokens from layer_n to layer_{n+1}
         #These are mixed into subsequent tokens of layer n+1 by convolution, but their index is then discarded
         # the convolution is causal, so the mixing only goes in one direction
         rank, world_size = dist.get_rank(), dist.get_world_size()
-        ctx.padding = padding
         if world_size == 1:
             return x
         group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
-        ctx.group_ranks = group_ranks
+        #ctx.group_ranks = group_ranks
         send_to_rank = _next(rank, group_ranks) if rank != group_ranks[-1] else None
         receive_from_rank = _prev(rank, group_ranks) if rank != group_ranks[0] else None
         #print('dist', rank, send_to_rank, receive_from_rank)
         #_, pre_tokens = x.split(x.shape[1]-self.padding, dim=1)
-        pre_tokens = x[:, -ctx.padding:].contiguous()
+        pre_tokens = x[:, -padding:].contiguous()
         #print('dist',rank,pre_tokens.requires_grad)
-        assert pre_tokens.shape[1] == ctx.padding
+        assert pre_tokens.shape[1] == padding
         receive_buffer = torch.zeros_like(pre_tokens, requires_grad=True).contiguous() #TODO this isn't used by rank=0
         send_and_receive_(pre_tokens, receive_buffer, send_to_rank, receive_from_rank)
         if rank != group_ranks[0]:
-            x = F.pad(x, (0, 0, ctx.padding, 0), 'constant', 0)
-            x[:,:ctx.padding] = receive_buffer
+            x = F.pad(x, (0, 0, padding, 0), 'constant', 0)
+            x[:,:padding] = receive_buffer
             #print('dist',rank,'receive_buffer grad',receive_buffer.requires_grad)
         #print('x', rank, x.shape)
         return x
-
+    
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        # ctx is a context object that can be used to stash information
+        # for backward computation
+        x, padding, process_group = inputs
+        #print(ctx, type(ctx), ctx.__class__.__name__, sep="\n")
+        world_size = dist.get_world_size()
+        group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
+        ctx.padding = padding
+        ctx.group_ranks = group_ranks
+    
     @staticmethod
     def backward(ctx, grad_x):
         """
@@ -73,22 +83,22 @@ class SequenceParallelMixerFn(Function):
         to the previous layer...
         """
         rank, world_size = dist.get_rank(), dist.get_world_size()
-        group_ranks = ctx.group_ranks
+        padding, group_ranks = ctx.padding, ctx.group_ranks
         #print('grad_x', rank, grad_x.shape)
         if world_size == 1:
-            return grad_x, None
+            return grad_x, None, None
         receive_from_rank = _next(rank, group_ranks) if rank != group_ranks[-1] else None
         send_to_rank = _prev(rank, group_ranks) if rank != group_ranks[0] else None
-        pre_tokens_grad = grad_x[:,:ctx.padding].contiguous()
-        if rank !=ctx.group_ranks[0]:
-            grad_x_out = grad_x[:,ctx.padding:].contiguous()
+        pre_tokens_grad = grad_x[:,:padding].contiguous()
+        if rank !=group_ranks[0]:
+            grad_x_out = grad_x[:,padding:].contiguous()
         else:
             grad_x_out = grad_x.clone()
-        assert pre_tokens_grad.shape[1] == ctx.padding
+        assert pre_tokens_grad.shape[1] == padding
         receive_buffer = torch.zeros_like(pre_tokens_grad).contiguous() #TODO this isn't used by rank=0
         send_and_receive_(pre_tokens_grad, receive_buffer, send_to_rank, receive_from_rank)
         if rank != group_ranks[-1]:
-            grad_x_out[:,-ctx.padding:] += receive_buffer
+            grad_x_out[:,-padding:] += receive_buffer
         return grad_x_out, None, None
 
 class SequenceParallelMixerLayer(nn.Module):
@@ -100,9 +110,9 @@ class SequenceParallelMixerLayer(nn.Module):
         return SequenceParallelMixerFn.apply(x, self.padding, self.process_group)
 
 class ContextParallelMambaLayer(nn.Module):
-    def __init__(self, size, group):
+    def __init__(self, d_model, group, tag=None):
         super(ContextParallelMambaLayer, self).__init__()
-        mamba_layer = Mamba2(256, cp_group=group)
+        mamba_layer = Mamba2(d_model, d_conv = 4, cp_group=group, tag=tag)
         padding = mamba_layer.d_conv - 1
         self.model = nn.Sequential(SequenceParallelMixerLayer(padding, group), mamba_layer)
     def forward(self, x):
@@ -119,6 +129,7 @@ parser.add_argument("--random_seed", type=int)
 parser.add_argument("--batch_size", type=int)
 parser.add_argument("--iterations", type=int)
 parser.add_argument("--num_layers", type=int)
+parser.add_argument("--d_model", type=int)
 args = parser.parse_args()
 print(args)
 torch.manual_seed(args.random_seed)
@@ -126,6 +137,7 @@ num_gpus = args.nproc_per_node
 num_layers = args.num_layers
 batch = args.batch_size
 iterations = args.iterations
+d_model = args.d_model
 #mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
 device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(args.fsdp, num_gpus//args.fsdp), mesh_dim_names=('dp','cp'))
 cp_mesh, dp_mesh = device_mesh['cp'], device_mesh['dp']
@@ -163,23 +175,28 @@ end = torch.cuda.Event(enable_timing=True)
 res_forward = list()
 res_backward = list()
 layers = []
-for _ in range(num_layers):
-    mamba_layer = ContextParallelMambaLayer(256,cp_mesh.get_group())
+for i in range(num_layers):
+    mamba_layer = ContextParallelMambaLayer(d_model,cp_mesh.get_group(), tag = str(i))
     layers.append(mamba_layer)
 model = nn.Sequential(*layers) #.cuda()
 if dist.get_rank() == 0:
     print(model)
 
 # Init FSDP using the dp device mesh
-sharded_model = FSDP(model, device_mesh=dp_mesh, auto_wrap_policy=ModuleWrapPolicy([ContextParallelMambaLayer]))#use_orig_params=True)
-sharded_model = sharded_model.cuda()
-for s in range(9,14):
+model_wrap_policy = ModuleWrapPolicy([ContextParallelMambaLayer,Mamba2])
+sharded_model = FSDP(model, device_mesh=dp_mesh, auto_wrap_policy=model_wrap_policy).cuda()#use_orig_params=True)
+sharded_model = sharded_model.to(rank)
+print(f"Rank {rank}", sharded_model)
+print(f"Rank {rank}", model_wrap_policy)
+for s in range(14,26):
     length = 2**s
-    seq = torch.randn([iterations,batch,length*8,256],device='cpu')
+    seq = torch.randn([iterations,batch,length,d_model],device='cpu')
     #torch.save(seq,'seq.pt')
     #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
-    assert seq.shape[1]%num_gpus == 0
+    assert seq.shape[2]%num_gpus == 0, "Not the right sequence shape"
     seq_per_gpu = seq.shape[2]//num_gpus
+    if rank ==0:
+        print("Running ", s, " with ", seq_per_gpu, " per gpu")
     #print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
     #Equal split sequences - easy test
     #sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)

@@ -979,8 +979,11 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
         seqlen -= lb #context parallel
+
+        #print("zxbcdt shape", zxbcdt.shape, "XBC Stride:",rearrange(xBC, "b s d -> b d s").stride())
+        assert xBC.stride()[0]%8 == 0 and xBC.stride()[1]%8 ==0, "Need to select sequence length such that " + str(xBC.shape) + " has strides // 8 " + str(xBC.stride())
         xBC_conv = rearrange(
-            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
+            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s").contiguous(),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
             "b d s -> b s d"
         )[:, lb:, :].contiguous()
