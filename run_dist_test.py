@@ -4,6 +4,7 @@ from mamba_ssm import Mamba2
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
@@ -98,6 +99,14 @@ class SequenceParallelMixerLayer(nn.Module):
     def forward(self,x):
         return SequenceParallelMixerFn.apply(x, self.padding, self.process_group)
 
+class ContextParallelMambaLayer(nn.Module):
+    def __init__(self, size, group):
+        super(ContextParallelMambaLayer, self).__init__()
+        mamba_layer = Mamba2(256, cp_group=group)
+        padding = mamba_layer.d_conv - 1
+        self.model = nn.Sequential(SequenceParallelMixerLayer(padding, group), mamba_layer)
+    def forward(self, x):
+        return self.model(x)
 
 parser = argparse.ArgumentParser()
 # This is always passed in by default
@@ -155,18 +164,16 @@ res_forward = list()
 res_backward = list()
 layers = []
 for _ in range(num_layers):
-    mamba_layer = Mamba2(256,cp_group=cp_mesh.get_group())
-    padding = mamba_layer.d_conv - 1
-    layers.append(SequenceParallelMixerLayer(padding, cp_mesh.get_group()))
+    mamba_layer = ContextParallelMambaLayer(256,cp_mesh.get_group())
     layers.append(mamba_layer)
-model = nn.Sequential(*layers).cuda()
+model = nn.Sequential(*layers) #.cuda()
 if dist.get_rank() == 0:
     print(model)
 
 # Init FSDP using the dp device mesh
-sharded_model = FSDP(model, device_mesh=dp_mesh, use_orig_params=True)
-
-for s in range(12,13):
+sharded_model = FSDP(model, device_mesh=dp_mesh, auto_wrap_policy=ModuleWrapPolicy([ContextParallelMambaLayer]))#use_orig_params=True)
+sharded_model = sharded_model.cuda()
+for s in range(9,14):
     length = 2**s
     seq = torch.randn([iterations,batch,length*8,256],device='cpu')
     #torch.save(seq,'seq.pt')

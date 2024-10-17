@@ -484,14 +484,14 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         #dist.barrier()
         # print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(group_ranks[:-1], group_ranks[1:]):
-            print(f"{rank} - {rank1} - {rank2}")
+            #print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
-                print(f"transfer {rank1}:{rank2}")
+                #print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     final_states = torch.zeros_like(states[:, -1])
                 initial_states = _transfer(final_states, rank1, rank2)
             if rank == rank2:
-                print(f"state passing {rank2}")
+                #print(f"state passing {rank2}")
                 states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size,
                                                                C)
             dist.barrier()
