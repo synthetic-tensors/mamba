@@ -132,6 +132,7 @@ parser.add_argument("--num_layers", type=int)
 parser.add_argument("--d_model", type=int)
 args = parser.parse_args()
 print(args)
+assert args.d_model == 256, "Need to fix the conv layer stride issue where d_model*sharded seq length reqiores multiples of 8"
 torch.manual_seed(args.random_seed)
 num_gpus = args.nproc_per_node
 num_layers = args.num_layers
@@ -185,16 +186,17 @@ if dist.get_rank() == 0:
 # Init FSDP using the dp device mesh
 model_wrap_policy = ModuleWrapPolicy([ContextParallelMambaLayer,Mamba2])
 sharded_model = FSDP(model, device_mesh=dp_mesh, auto_wrap_policy=model_wrap_policy).cuda()#use_orig_params=True)
+#sharded_model = sharded_model.half().to(rank) #Half precision seems to make the state passing_bw calculation hang on the first initial state backward pass (e.g. GPU 6 state passing bw)
 sharded_model = sharded_model.to(rank)
 print(f"Rank {rank}", sharded_model)
 print(f"Rank {rank}", model_wrap_policy)
-for s in range(14,15):
+for s in range(15,25):
     length = 2**s
-    seq = torch.randn([iterations,batch,length,d_model],device='cpu')
+    #seq = torch.randn([iterations,batch,length,d_model],device='cpu',dtype=torch.float16)
     #torch.save(seq,'seq.pt')
     #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
-    assert seq.shape[2]%num_gpus == 0, "Not the right sequence shape"
-    seq_per_gpu = seq.shape[2]//num_gpus
+    assert length%num_gpus == 0, "Not the right sequence shape"
+    seq_per_gpu = length//num_gpus
     if rank ==0:
         print("Running ", s, " with ", seq_per_gpu, " per gpu")
     #print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
@@ -203,12 +205,14 @@ for s in range(14,15):
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
     #Split with padded repeats for 1d conv overlap
     #sequence = [seq[:, :, seq_per_gpu*r:seq_per_gpu*(r+1)+padding] for r in range(world_size)]
-    sequence = [seq[:, :, seq_per_gpu * r:seq_per_gpu * (r + 1)] for r in range(world_size)] #Don't need padding with Mixer layer
+    #sequence = [seq[:, :, seq_per_gpu * r:seq_per_gpu * (r + 1)] for r in range(world_size)] #Don't need padding with Mixer layer
+    sequence = torch.randn([world_size,iterations,batch,seq_per_gpu,1], device='cpu')#,dtype=torch.float16) #Not for comparing to 1 GPU
     #with dist_autograd.context() as context_id:
     for i in range(iterations):
         #input_tensor = sequence[i,rank].cuda()
         #print(f"{sequence[rank].shape = }")
-        input_tensor = sequence[rank][i].cuda().contiguous()
+        #input_tensor = sequence[rank][i].to(rank).contiguous()
+        input_tensor = sequence[rank,i].to(rank).repeat(1,1,d_model).contiguous()
         #with torch.autograd.profiler.profile(use_cuda=True) as prof:
         start.record()
         output = sharded_model(input_tensor)
@@ -236,10 +240,11 @@ for s in range(14,15):
             print("backward",rank,i, a/10**9, r/10**9, 'GB')
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
             print("backward",rank,i,t, 'ms')
-        dist.barrier()
-    torch.save(input_tensor,f'input_{rank}.pt')
-    torch.save(output, f"output_{rank}.pt")
-    torch.save({x[0]:x[1].grad for x in model.named_parameters()}, f"grad_dict_{rank}.pt")
+        torch.cuda.empty_cache()
+        #dist.barrier()
+    #torch.save(input_tensor,f'input_{rank}.pt')
+    #torch.save(output, f"output_{rank}.pt")
+    #torch.save({x[0]:x[1].grad for x in model.named_parameters()}, f"grad_dict_{rank}.pt")
 pd.DataFrame(res_forward).to_csv(f'res_fw_{rank}.csv')
 pd.DataFrame(res_backward).to_csv(f'res_bw_{rank}.csv')
 dist.destroy_process_group()

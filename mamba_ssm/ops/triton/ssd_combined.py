@@ -383,7 +383,7 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
         group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
         if rank == group_ranks[0]:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-        #dist.barrier()
+        dist.barrier()
         #print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(group_ranks[:-1], group_ranks[1:]):
             #print(f"{rank} - {rank1} - {rank2}")
@@ -481,7 +481,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
         if rank == group_ranks[0]:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-        #dist.barrier()
+        dist.barrier()
         # print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(group_ranks[:-1], group_ranks[1:]):
             #print(f"{rank} - {rank1} - {rank2}")
@@ -547,9 +547,9 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         rank = dist.get_rank()
         group_ranks = dist.get_process_group_ranks(process_group) if process_group else list(range(world_size))
         if rank == group_ranks[-1]:
-            sMambaSplitConv1dScanCombinedFnBackwardtates, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
-        #dist.barrier()
-        # print('passing states sequentially multi-gpu')
+            states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
+        dist.barrier()
+        #print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(group_ranks[-1:0:-1], group_ranks[-2::-1]):
             #print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
