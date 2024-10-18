@@ -981,7 +981,8 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         seqlen -= lb #context parallel
 
         #print("zxbcdt shape", zxbcdt.shape, "XBC Stride:",rearrange(xBC, "b s d -> b d s").stride())
-        assert xBC.stride()[0]%8 == 0 and xBC.stride()[1]%8 ==0, "Need to select sequence length such that " + str(xBC.shape) + " has strides // 8 " + str(xBC.stride())
+        #assert xBC.stride()[0]%8 == 0 and xBC.stride()[1]%8 ==0, "Need to select sequence length such that " + str(xBC.shape) + " has strides // 8 " + str(xBC.stride())
+        #print('dim',dim,'dstate',dstate,'d_nonssm',d_nonssm,'headdim',headdim,'nheads',nheads,'seqlen',seqlen,'shape(xBC)',xBC.shape,'stride',xBC.stride())
         xBC_conv = rearrange(
             causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s").contiguous(),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),

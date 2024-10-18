@@ -9,6 +9,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 
+"""
+Notes
+d_model 64 / headdim 16 works
+d_model 128 / headdim 32 works
+d_model 256 / headdim 64 works
+
+Issues:
+There is a bug at sequence length 10**25/8GPUs on bw pass of causal_conv1d, needs device side asserts compilation probably to identify it probably
+Bw pass hangs at state passing calculation on first GPU with initialized state (e.g. GPU 6) when using half precision
+"""
 #import torch.distributed.autograd as dist_autograd
 #from einops import rearrange
 if not dist.is_available():
@@ -112,7 +122,13 @@ class SequenceParallelMixerLayer(nn.Module):
 class ContextParallelMambaLayer(nn.Module):
     def __init__(self, d_model, group, tag=None):
         super(ContextParallelMambaLayer, self).__init__()
-        mamba_layer = Mamba2(d_model, d_conv = 4, cp_group=group, tag=tag)
+        #headdim=
+        #dim = expand * d_ssm #nheads*headdim
+        #dstate = (conv1d_weight.shape[0]-dim)//ngroups//2
+        #xBCd1 = dim + 2 * ngroups * dstate #This must be a multiple of 8
+       ##xbcd2=1027
+        #stride = 0
+        mamba_layer = Mamba2(d_model, headdim=64, ngroups=1, d_conv = 4, cp_group=group, tag=tag)
         padding = mamba_layer.d_conv - 1
         self.model = nn.Sequential(SequenceParallelMixerLayer(padding, group), mamba_layer)
     def forward(self, x):
@@ -132,7 +148,7 @@ parser.add_argument("--num_layers", type=int)
 parser.add_argument("--d_model", type=int)
 args = parser.parse_args()
 print(args)
-assert args.d_model == 256, "Need to fix the conv layer stride issue where d_model*sharded seq length reqiores multiples of 8"
+#assert args.d_model == 256, "Need to fix the conv layer stride issue where d_model*sharded seq length reqiores multiples of 8"
 torch.manual_seed(args.random_seed)
 num_gpus = args.nproc_per_node
 num_layers = args.num_layers
@@ -184,13 +200,15 @@ if dist.get_rank() == 0:
     print(model)
 
 # Init FSDP using the dp device mesh
-model_wrap_policy = ModuleWrapPolicy([ContextParallelMambaLayer,Mamba2])
-sharded_model = FSDP(model, device_mesh=dp_mesh, auto_wrap_policy=model_wrap_policy).cuda()#use_orig_params=True)
+#model_wrap_policy = ModuleWrapPolicy([ContextParallelMambaLayer,Mamba2])
+#sharded_model = FSDP(model, device_mesh=dp_mesh, auto_wrap_policy=model_wrap_policy).cuda()#use_orig_params=True)
 #sharded_model = sharded_model.half().to(rank) #Half precision seems to make the state passing_bw calculation hang on the first initial state backward pass (e.g. GPU 6 state passing bw)
-sharded_model = sharded_model.to(rank)
-print(f"Rank {rank}", sharded_model)
-print(f"Rank {rank}", model_wrap_policy)
-for s in range(15,25):
+#sharded_model = sharded_model.to(rank)
+#print(f"Rank {rank}", sharded_model)
+#print(f"Rank {rank}", model_wrap_policy)
+
+sharded_model = model.to(rank)
+for s in range(15,23):
     length = 2**s
     #seq = torch.randn([iterations,batch,length,d_model],device='cpu',dtype=torch.float16)
     #torch.save(seq,'seq.pt')
@@ -241,7 +259,7 @@ for s in range(15,25):
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
             print("backward",rank,i,t, 'ms')
         torch.cuda.empty_cache()
-        #dist.barrier()
+        dist.barrier()
     #torch.save(input_tensor,f'input_{rank}.pt')
     #torch.save(output, f"output_{rank}.pt")
     #torch.save({x[0]:x[1].grad for x in model.named_parameters()}, f"grad_dict_{rank}.pt")

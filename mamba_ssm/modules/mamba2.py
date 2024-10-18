@@ -170,7 +170,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
-        print(f"Forward {dist.get_rank()} running layer {self.tag}")
+        #print(f"Forward {dist.get_rank()} running layer {self.tag}")
         seqlen_og = seqlen
         if seqlen is None:
             batch, seqlen, dim = u.shape
