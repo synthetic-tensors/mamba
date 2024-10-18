@@ -1071,6 +1071,8 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         lb = 0 if ctx.rank == group_ranks[0] else conv1d_weight.shape[1] - 1 #Added for context parallel
         zx0, z, dt = zx0[:,lb:], z[:,lb:], dt[:,lb:] # Context parallel
         #torch.save(z,f'z_{dist.get_rank()}.pt')
+        
+        print(f'{xBC.shape = }, {conv1d_weight.shape = }, {conv1d_bias.shape = }, {seq_idx = }, {ctx.activation = }')
         xBC_conv = rearrange(
             causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
@@ -1241,6 +1243,7 @@ def mamba_split_conv1d_scan_ref(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, 
     if rmsnorm_weight is not None:
         assert rmsnorm_weight.shape == (dim,)
     z, xBC, dt = torch.split(zxbcdt, [dim, dim + 2 * ngroups * dstate, nheads], dim=-1)
+    print(f'{xBC.shape = }')
     xBC = rearrange(causal_conv1d_fn(rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias, activation=activation),
                     "b d s -> b s d")
     x, B, C = torch.split(xBC, [dim, ngroups * dstate, ngroups * dstate], dim=-1)

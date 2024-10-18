@@ -128,7 +128,8 @@ class ContextParallelMambaLayer(nn.Module):
         #xBCd1 = dim + 2 * ngroups * dstate #This must be a multiple of 8
        ##xbcd2=1027
         #stride = 0
-        mamba_layer = Mamba2(d_model, headdim=64, ngroups=1, d_conv = 4, cp_group=group, tag=tag)
+
+        mamba_layer = Mamba2(d_model, headdim=min(64,d_model//4), ngroups=1, d_conv = 4, cp_group=group, tag=tag)
         padding = mamba_layer.d_conv - 1
         self.model = nn.Sequential(SequenceParallelMixerLayer(padding, group), mamba_layer)
     def forward(self, x):
@@ -146,6 +147,7 @@ parser.add_argument("--batch_size", type=int)
 parser.add_argument("--iterations", type=int)
 parser.add_argument("--num_layers", type=int)
 parser.add_argument("--d_model", type=int)
+parser.add_argument("--dtype", type=str, default="bfloat16")
 args = parser.parse_args()
 print(args)
 #assert args.d_model == 256, "Need to fix the conv layer stride issue where d_model*sharded seq length reqiores multiples of 8"
@@ -155,6 +157,12 @@ num_layers = args.num_layers
 batch = args.batch_size
 iterations = args.iterations
 d_model = args.d_model
+if args.dtype == 'bfloat16':
+    dtype = torch.bfloat16
+elif args.dtype == 'float16':
+    dtype = torch.float16
+else:
+    dtype = torch.float32
 #mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
 device_mesh = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(args.fsdp, num_gpus//args.fsdp), mesh_dim_names=('dp','cp'))
 cp_mesh, dp_mesh = device_mesh['cp'], device_mesh['dp']
@@ -206,9 +214,8 @@ if dist.get_rank() == 0:
 #sharded_model = sharded_model.to(rank)
 #print(f"Rank {rank}", sharded_model)
 #print(f"Rank {rank}", model_wrap_policy)
-
-sharded_model = model.to(rank)
-for s in range(15,23):
+sharded_model = model.to(device = rank, dtype=dtype)
+for s in range(16,22):
     length = 2**s
     #seq = torch.randn([iterations,batch,length,d_model],device='cpu',dtype=torch.float16)
     #torch.save(seq,'seq.pt')
@@ -224,28 +231,28 @@ for s in range(15,23):
     #Split with padded repeats for 1d conv overlap
     #sequence = [seq[:, :, seq_per_gpu*r:seq_per_gpu*(r+1)+padding] for r in range(world_size)]
     #sequence = [seq[:, :, seq_per_gpu * r:seq_per_gpu * (r + 1)] for r in range(world_size)] #Don't need padding with Mixer layer
-    sequence = torch.randn([world_size,iterations,batch,seq_per_gpu,1], device='cpu')#,dtype=torch.float16) #Not for comparing to 1 GPU
+    sequence = torch.randn([world_size,iterations,batch,seq_per_gpu,1], device='cpu', dtype=dtype) #Not for comparing to 1 GPU
     #with dist_autograd.context() as context_id:
     for i in range(iterations):
         #input_tensor = sequence[i,rank].cuda()
         #print(f"{sequence[rank].shape = }")
         #input_tensor = sequence[rank][i].to(rank).contiguous()
-        input_tensor = sequence[rank,i].to(rank).repeat(1,1,d_model).contiguous()
+        input_tensor = sequence[rank,i].to(device = rank,dtype=dtype).repeat(1,1,d_model).contiguous()
         #with torch.autograd.profiler.profile(use_cuda=True) as prof:
         start.record()
         output = sharded_model(input_tensor)
-        end.record()
-        torch.cuda.synchronize()
-        r = torch.cuda.memory_reserved(rank)
-        a = torch.cuda.memory_allocated(rank)
-        t = start.elapsed_time(end)
-        res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
-        if rank == 0:
-            print("forward",s,i, a/10**9, r/10**9, 'GB')
+        #end.record()
+        #torch.cuda.synchronize()
+        #r = torch.cuda.memory_reserved(rank)
+        #a = torch.cuda.memory_allocated(rank)
+        #t = start.elapsed_time(end)
+        #res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
+        #if rank == 0:
+        #    print("forward",s,i, a/10**9, r/10**9, 'GB')
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-            print("forward",s,i,t, 'ms')
+        #    print("forward",s,i,t, 'ms')
         model.zero_grad()
-        start.record()
+        #start.record()
         #dist_autograd.backward(context_id, [output[:,-1,:].sum()]) #For RPC only
         output.sum().backward()
         end.record()
@@ -255,9 +262,9 @@ for s in range(15,23):
         t = start.elapsed_time(end)
         res_backward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
         if rank == 0:
-            print("backward",rank,i, a/10**9, r/10**9, 'GB')
+            print("backward",s,i, a/10**9, r/10**9, 'GB')
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-            print("backward",rank,i,t, 'ms')
+            print("backward",s,i,t, 'ms')
         torch.cuda.empty_cache()
         dist.barrier()
     #torch.save(input_tensor,f'input_{rank}.pt')
