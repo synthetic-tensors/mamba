@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
 
 def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
-    assert send_to_rank or receive_from_rank
+    assert send_to_rank is not None or receive_from_rank is not None
     ops = []
     if send_to_rank is not None:
         ops.append(dist.P2POp(dist.isend, x, send_to_rank))
@@ -23,7 +23,7 @@ def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
         req.wait()
     dist.barrier()
 
-class SequenceParallelMixerFn(Function):
+class SequenceParallelMixerFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, padding=0):
         #Prepends the last n_padding tokens from layer_n to layer_{n+1}
@@ -85,7 +85,7 @@ class SequenceParallelMixerLayer(nn.Module):
 class Block(nn.Module):
     def __init__(
         self, dim, mixer_cls, mlp_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False,
-            context_parallel=False
+            context_parallel=False, padding=0,
     ):
         """
         Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection"
@@ -114,8 +114,8 @@ class Block(nn.Module):
             assert isinstance(
                 self.norm, (nn.LayerNorm, RMSNorm)
             ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
-        if self.contextparallel:
-            self.cpmixer = SequenceParallelMixerLayer(padding=mixer_cls.d_conv - 1)
+        if context_parallel:
+            self.cpmixer = SequenceParallelMixerLayer(padding=padding if padding else self.mixer.d_conv - 1)
         else:
             self.cpmixer = None
 
