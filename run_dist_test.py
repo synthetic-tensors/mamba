@@ -106,7 +106,7 @@ for s in range(12,13):
         residual = None
         for i,layer in enumerate(model):
             input_tensor,residual = layer(input_tensor,residual)
-            print(f'{i = } - {dist.get_rank() = } - {input_tensor.shape = }')
+#            print(f'{i = } - {dist.get_rank() = } - {input_tensor.shape = }')
         output=input_tensor
         end.record()
         torch.cuda.synchronize()
