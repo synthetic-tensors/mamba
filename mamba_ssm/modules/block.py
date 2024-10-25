@@ -146,6 +146,8 @@ class Block(nn.Module):
 
         if self.cpmixer: #Context parallel - transfer some tokens to mix in with the conv layer to the next GPU
             hidden_states = self.cpmixer(hidden_states)
+            if residual is not None:
+                residual = self.cpmixer(residual)
 
         hidden_states = self.mixer(hidden_states, inference_params=inference_params, **mixer_kwargs)
 
