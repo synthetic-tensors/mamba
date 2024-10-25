@@ -29,10 +29,8 @@ from mamba_ssm.distributed.tensor_parallel import ColumnParallelLinear, RowParal
 from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
-if torch.distributed.is_initialized(): #FIXME Hacky way to do CP
-    from mamba_ssm.ops.triton.ssd_combined_cp import mamba_split_conv1d_scan_combined
-else:
-    from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
+from mamba_ssm.ops.triton.ssd_combined_cp import mamba_split_conv1d_scan_combined as mamba_split_conv1d_scan_combined_cp
+from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 
 
 
@@ -198,7 +196,8 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
 
         if self.use_mem_eff_path and inference_params is None:
             #print('Using mem_eff_path combined conv1d/scan')
-            out = mamba_split_conv1d_scan_combined(
+            fn = mamba_split_conv1d_scan_combined_cp if torch.distributed.is_initialized() else mamba_split_conv1d_scan_combined
+            out = fn(
                 zxbcdt,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
                 self.conv1d.bias,

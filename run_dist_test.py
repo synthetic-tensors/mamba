@@ -1,6 +1,7 @@
 from collections import defaultdict
 import pandas as pd
 from mamba_ssm import Mamba2
+from mamba_ssm.ops.triton.layer_norm import RMSNorm
 from mamba_ssm.modules.block import Block
 import torch
 
@@ -29,6 +30,7 @@ torch.manual_seed(args.random_seed)
 num_gpus = args.nproc_per_node
 num_layers = args.num_layers
 batch = args.batch_size
+d_model = 256
 iterations = args.iterations
 if num_gpus > 1:
     mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
@@ -65,9 +67,9 @@ res_backward = list()
 layers = []
 for layer_idx in range(num_layers):
     block = Block(
-            256,
+            d_model,
             Mamba2,
-            norm_cls=nn.LayerNorm,
+            norm_cls=RMSNorm,
             mlp_cls=nn.Identity,
             fused_add_norm=True,
             context_parallel=True if dist.is_initialized() else False,
@@ -81,7 +83,7 @@ if rank == 0:
 
 for s in range(12,13):
     length = 2**s
-    seq = torch.randn([iterations,batch,length*8,256],device='cpu')
+    seq = torch.randn([iterations,batch,length*8,d_model],device='cpu')
     #torch.save(seq,'seq.pt')
     #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
     assert seq.shape[1]%num_gpus == 0
@@ -102,8 +104,9 @@ for s in range(12,13):
         start.record()
         print(input_tensor.shape)
         residual = None
-        for layer in model:
-            input_tensor,resdidual = layer(input_tensor,residual)
+        for i,layer in enumerate(model):
+            input_tensor,residual = layer(input_tensor,residual)
+            print(f'{i = } - {dist.get_rank() = } - {input_tensor.shape = }')
         output=input_tensor
         end.record()
         torch.cuda.synchronize()
