@@ -30,7 +30,8 @@ num_gpus = args.nproc_per_node
 num_layers = args.num_layers
 batch = args.batch_size
 iterations = args.iterations
-mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
+if num_gpus > 1:
+    mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
 #print(mesh_1d.get_group().bound_device_id)
 #if dist.get_rank() == 0:
     #N.B. must use contiguous when splitting tensors for distributed ops!
@@ -51,8 +52,10 @@ f = r-a  # free inside reserved
 #print(dist.get_rank(), input_tensor.shape)
 #dist.scatter(input_tensor, sequence, src=0)
 #print(input_tensor[0,0,0], dist.get_rank())
-world_size, rank = dist.get_world_size(), dist.get_rank()
-
+if dist.is_initialized():
+    world_size, rank = dist.get_world_size(), dist.get_rank()
+else:
+    world_size, rank = 1, 0
 
 start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
@@ -67,13 +70,13 @@ for layer_idx in range(num_layers):
             norm_cls=nn.LayerNorm,
             mlp_cls=nn.Identity,
             fused_add_norm=True,
-            context_parallel=True,
+            context_parallel=True if dist.is_initialized() else False,
             #residual_in_fp32,
         )
     block.layer_idx = layer_idx
     layers.append(block)
-model = nn.Sequential(*layers).cuda()
-if dist.get_rank() == 0:
+model = nn.ModuleList(layers).cuda()
+if rank == 0:
     print(model)
 
 for s in range(12,13):
@@ -97,7 +100,11 @@ for s in range(12,13):
         input_tensor = sequence[rank][i].cuda().contiguous()
         #with torch.autograd.profiler.profile(use_cuda=True) as prof:
         start.record()
-        output = model(input_tensor)
+        print(input_tensor.shape)
+        residual = None
+        for layer in model:
+            input_tensor,resdidual = layer(input_tensor,residual)
+        output=input_tensor
         end.record()
         torch.cuda.synchronize()
         r = torch.cuda.memory_reserved(rank)
@@ -122,31 +129,13 @@ for s in range(12,13):
             print("backward",rank,i, a/10**9, r/10**9, 'GB')
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
             print("backward",rank,i,t, 'ms')
-        dist.barrier()
+        if dist.is_initialized() and world_size > 1:
+            dist.barrier()
     torch.save(input_tensor,f'input_{rank}.pt')
     torch.save(output, f"output_{rank}.pt")
     torch.save({x[0]:x[1].grad for x in model.named_parameters()}, f"grad_dict_{rank}.pt")
 pd.DataFrame(res_forward).to_csv(f'res_fw_{rank}.csv')
 pd.DataFrame(res_backward).to_csv(f'res_bw_{rank}.csv')
-dist.destroy_process_group()
+if dist.is_initialized():
+    dist.destroy_process_group()
 
-exit()
-
-if dist.get_world_size() > 1:
-    tensor_list = gather(dist.get_rank(),output)
-    #print(dist.get_rank(), [x[0,0,0] for x in tensor_list])
-
-    if dist.get_rank() == 0:
-        torch.save(tensor_list, f'output.pt')
-else:
-    torch.save(output, f'output.pt')
-
-
-def gather(rank, tensor):
-        #group = dist.new_group(list(range(rank + 1)))
-        #shape = tensor.shape
-        tensor_list = [torch.zeros_like(tensor) for _ in range(dist.get_world_size())]
-        dist.all_gather(tensor_list, tensor) #  group=group)
-        return tensor_list
-
-#input_tensor = torch.zeros([batch,seq_per_gpu,256], device='cuda')
