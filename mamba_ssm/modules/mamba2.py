@@ -29,7 +29,12 @@ from mamba_ssm.distributed.tensor_parallel import ColumnParallelLinear, RowParal
 from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
-from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
+if torch.distributed.is_initialized(): #FIXME Hacky way to do CP
+    from mamba_ssm.ops.triton.ssd_combined_cp import mamba_split_conv1d_scan_combined
+else:
+    from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
+
+
 
 from huggingface_hub import PyTorchModelHubMixin
 
