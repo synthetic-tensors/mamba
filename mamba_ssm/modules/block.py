@@ -18,7 +18,6 @@ def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
         ops.append(dist.P2POp(dist.irecv, receive_buffer, receive_from_rank))
 
     reqs = dist.batch_isend_irecv(ops)
-
     for req in reqs:
         req.wait()
     dist.barrier()

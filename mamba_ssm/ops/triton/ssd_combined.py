@@ -543,21 +543,22 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         if rank == world_size-1:
             states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
         dist.barrier()
-        # print('passing states sequentially multi-gpu')
+        #print(f'passing states sequentially multi-gpu on {dist.get_rank()}')
         for rank1, rank2 in zip(range(world_size - 1,0,-1), range(world_size-2,-1,-1)):
-            #print(f"{rank} - {rank1} - {rank2}")
+            #print(f"d_on {rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
                 #print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     dinitial_states = torch.zeros_like(states[:, -1])
                 dfinal_states = _transfer(dinitial_states, rank1, rank2)
             if rank == rank2:
-                #print(f"state passing Wbackward {rank2}")
+                #print(f"state passing backward {rank2}")
                 states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates,
                                                                                              dfinal_states,
                                                                                              initial_states, seq_idx,
                                                                                              chunk_size, x)
             dist.barrier()
+            #print('done')
         dinitial_states = None #FIXME hack to because no initial states are used except between GPUs
     else:
         states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates,
@@ -626,6 +627,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     #torch.save(ddt_given,f"ddt_given_{dist.get_rank()}.pt")
     #torch.save(dz,f"dz_{dist.get_rank()}.pt")
     return_vals = (dx, ddt_given, dA, dB_given, dC_given, dD, dz, ddt_bias, dinitial_states)
+    #print('returning')
     return return_vals if not recompute_output else (*return_vals, outz)
 
 
