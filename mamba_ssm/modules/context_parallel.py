@@ -44,8 +44,7 @@ class ContextParallelMixerFn(torch.autograd.Function):
             #print('dist',rank,'receive_buffer grad',receive_buffer.requires_grad)
         #print('x', rank, x.shape)
         ctx.padding=padding
-        ctx.rank=rank
-        ctx.world_size=world_size
+        ctx.process_group = process_group
         return x
 
     @staticmethod
@@ -55,7 +54,8 @@ class ContextParallelMixerFn(torch.autograd.Function):
         the input of forward is not padded, this gradient needs to be popped and transfered
         to the previous layer...
         """
-        rank, world_size = ctx.rank, ctx.world_size
+        process_group = ctx.process_group
+        rank, world_size = dist.get_rank(process_group), dist.get_world_size(process_group)
         padding = ctx.padding
         #print('grad_x', rank, grad_x.shape)
         if world_size == 1:
@@ -69,15 +69,15 @@ class ContextParallelMixerFn(torch.autograd.Function):
             grad_x_out = grad_x.clone()
         assert pre_tokens_grad.shape[1] == ctx.padding
         receive_buffer = torch.zeros_like(pre_tokens_grad).contiguous() #TODO this isn't used by rank=0
-        send_and_receive_(pre_tokens_grad, receive_buffer, send_to_rank, receive_from_rank)
+        send_and_receive_(pre_tokens_grad, receive_buffer, send_to_rank, receive_from_rank, process_group)
         if rank < world_size -1:
             grad_x_out[:,-padding:] += receive_buffer
-        return grad_x_out, None
+        return grad_x_out, None, None
 
 class ContextParallelMixerLayer(nn.Module):
-    def __init__(self, padding = 0, process_group = torch.distributed.group.WORLD ):
+    def __init__(self, padding = 0):
         super(ContextParallelMixerLayer, self).__init__()
         self.padding = padding
-        self.process_group = process_group
-    def forward(self, x):
-        return ContextParallelMixerFn.apply(x, self.padding, self.process_group)
+
+    def forward(self, x, process_group=torch.distributed.group.WORLD):
+        return ContextParallelMixerFn.apply(x, self.padding, process_group)
