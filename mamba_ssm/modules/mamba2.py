@@ -32,6 +32,7 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from mamba_ssm.ops.triton.ssd_combined_cp import mamba_split_conv1d_scan_combined as mamba_split_conv1d_scan_combined_cp
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 
+from mamba_ssm.modules.context_parallel import ContextParallelMixerLayer
 
 
 from huggingface_hub import PyTorchModelHubMixin
@@ -101,12 +102,22 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
         self.layer_idx = layer_idx
+        self.context_parallel = context_parallel
+
+        if self.context_parallel or self.sequence_parallel and not self.process_group:
+            assert torch.distributed.is_initialized()
+            self.process_group = torch.distributed.group.WORLD
+
+        if self.context_parallel:
+            self.cpmixer = ContextParallelMixerLayer(padding=d_conv - 1, process_group=self.process_group)
+        else:
+            self.cpmixer = None
 
         # Order: [z, x, B, C, dt]
         d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
-        if self.process_group is None:
+        if not self.sequence_parallel:
             self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=bias, **factory_kwargs)
-        else:
+        else: #FIXME not sure why this has sequence parallel flag, why would use ColumnParallel without sequence parallel?
             self.in_proj = ColumnParallelLinear(self.d_model, d_in_proj * self.world_size, bias=bias,
                                                 process_group=self.process_group, sequence_parallel=self.sequence_parallel,
                                                 **factory_kwargs)
@@ -154,7 +165,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             self.norm = RMSNormGated(self.d_ssm, eps=1e-5, norm_before_gate=self.norm_before_gate,
                                      group_size=self.d_ssm // ngroups, **factory_kwargs)
 
-        if self.process_group is None:
+        if not self.sequence_parallel: #FIXME not sure why this has sequence parallel flag, why would use RowParallel without sequence parallel?
             self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
         else:
             self.out_proj = RowParallelLinear(self.d_inner * self.world_size, self.d_model, bias=bias,
@@ -169,7 +180,6 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
-        #print("Forward")
         seqlen_og = seqlen
         if seqlen is None:
             batch, seqlen, dim = u.shape
@@ -186,7 +196,9 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 out, _, _ = self.step(u, conv_state, ssm_state)
                 return out
 
-        #print(f"{u.shape = }")
+        if self.cpmixer: #Context parallel - transfer some tokens to mix in with the conv layer to the next GPU
+            u = self.cpmixer(u)
+
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
@@ -195,7 +207,6 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
 
         if self.use_mem_eff_path and inference_params is None:
-            #print('Using mem_eff_path combined conv1d/scan')
             fn = mamba_split_conv1d_scan_combined_cp if torch.distributed.is_initialized() else mamba_split_conv1d_scan_combined
             out = fn(
                 zxbcdt,
@@ -214,6 +225,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 headdim=None if self.D_has_hdim else self.headdim,
                 ngroups=self.ngroups,
                 norm_before_gate=self.norm_before_gate,
+                process_group=self.process_group,
                 **dt_limit_kwargs,
             )
             if seqlen_og is not None:
