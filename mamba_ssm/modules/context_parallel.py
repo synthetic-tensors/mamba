@@ -62,22 +62,23 @@ class ContextParallelMixerFn(torch.autograd.Function):
             return grad_x, None
         send_to_rank = rank -1 if rank > 0 else None
         receive_from_rank = rank + 1 if rank < world_size - 1 else None
-        pre_tokens_grad = grad_x[:,:padding].contiguous()
+        pre_tokens_grad = grad_x[:, :padding].contiguous()
         if rank > 0:
-            grad_x_out = grad_x[:,padding:].contiguous()
+            grad_x_out = grad_x[:, padding:].contiguous()
         else:
             grad_x_out = grad_x.clone()
         assert pre_tokens_grad.shape[1] == ctx.padding
         receive_buffer = torch.zeros_like(pre_tokens_grad).contiguous() #TODO this isn't used by rank=0
         send_and_receive_(pre_tokens_grad, receive_buffer, send_to_rank, receive_from_rank, process_group)
         if rank < world_size -1:
-            grad_x_out[:,-padding:] += receive_buffer
+            grad_x_out[:, -padding:] += receive_buffer
         return grad_x_out, None, None
 
 class ContextParallelMixerLayer(nn.Module):
-    def __init__(self, padding = 0):
+    def __init__(self, padding=0, process_group=torch.distributed.group.WORLD):
         super(ContextParallelMixerLayer, self).__init__()
         self.padding = padding
+        self.process_group = process_group
 
-    def forward(self, x, process_group=torch.distributed.group.WORLD):
-        return ContextParallelMixerFn.apply(x, self.padding, process_group)
+    def forward(self, x):
+        return ContextParallelMixerFn.apply(x, self.padding, self.process_group)

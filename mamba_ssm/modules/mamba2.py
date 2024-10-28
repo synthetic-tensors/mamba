@@ -113,7 +113,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             self.local_rank = torch.distributed.get_rank()
 
         if self.context_parallel:
-            self.cpmixer = ContextParallelMixerLayer(padding=d_conv - 1)#, process_group=self.process_group)
+            self.cpmixer = ContextParallelMixerLayer(padding=d_conv - 1, process_group=self.process_group)
         else:
             self.cpmixer = None
 
