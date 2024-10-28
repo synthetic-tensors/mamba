@@ -279,28 +279,12 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
             dD = rearrange(dD, "h 1 -> h")
     return dx, ddt.to(dtype=dt.dtype), dD
 
-def _all_gather(tensor):
-    #group = dist.new_group(list(range(rank + 1)))
-    #shape = tensor.shape
-    tensor_list = [torch.zeros_like(tensor) for _ in range(dist.get_world_size())]
-    dist.all_gather(tensor_list, tensor) #  group=group)
-    return tensor_list
 
-
-def _gather(tensor, rank):
-    #group = dist.new_group(list(range(rank + 1)))
-    #shape = tensor.shape
-    tensor_list = [torch.zeros_like(tensor) for _ in range(dist.get_world_size())]
-    dist._gather(tensor_list, tensor) #  group=group)
-    return tensor_list
-
-
-def _transfer(tensor, send_rank, recv_rank, group=None):
+def _transfer(tensor, rank, send_rank, recv_rank, group=None):
     """
         Sends tensor to root process, which store it in tensor_list.
     """
 
-    rank = dist.get_rank()
     if rank not in [send_rank, recv_rank]:
         return tensor
     if rank == send_rank:
@@ -310,19 +294,9 @@ def _transfer(tensor, send_rank, recv_rank, group=None):
     return tensor
 
 
-def gather():
-    for rank1, rank2 in zip(range(world_size[:-1]),range(world_size[1:])):
-        if group is None:
-            group = dist.group.WORLD
-        if rank == root:
-            assert (tensor_list is not None)
-            dist.gather(tensor, gather_list=tensor_list, group=group)
-        else:
-            dist.gather(tensor, dst=root, group=group)
-
-        torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
-
-def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
+def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, world_size, rank, D=None, z=None, dt_bias=None,
+                                   initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False,
+                                   dt_limit=(0.0, float("inf"))):
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
@@ -353,17 +327,8 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # dA_cumsum_tmp0, dt_tmp0 = _chunk_cumsum_fwd(dt[:, :147], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     # dA_cumsum_tmp1, dt_tmp1 = _chunk_cumsum_fwd(dt[:, 147:], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     # dA_cumsum_tmp2, dt_tmp2 = _chunk_cumsum_fwd(dt[:, 147:256], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
-    #torch.save(dt, f"dt_{dist.get_rank()}.pt")
     dA_cumsum, dt = _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_limit=dt_limit)
-    #Update the cumulative sum for Context Parallel
-    #if dist.get_world_size() > 1:
-    #    dA_cumsum_last = _gather(dA_cumsum[:, :, -1, :].unsqueeze(2).contiguous())
-    #    for i in range(dist.get_rank()):
-    #        print('adding', i)
-    #        dA_cumsum += dA_cumsum_last[i]
-    #torch.save(rearrange(dA_cumsum,'i j k l -> i k j l'), f"dA_cumsum_{dist.get_rank()}.pt")
     states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
-    #torch.save(states, f"states_{dist.get_rank()}.pt")
     # states_tmp0 = _chunk_state_fwd(B[:, :147], x[:, :147], dt_tmp0, dA_cumsum_tmp0, states_in_fp32=True)
     # states_tmp1 = _chunk_state_fwd(B[:, 147:], x[:, 147:], dt_tmp1, dA_cumsum_tmp1, states_in_fp32=True)
     # states_tmp2 = _chunk_state_fwd(B[:, 147:256], x[:, 147:256], dt_tmp2, dA_cumsum_tmp2, states_in_fp32=True)
@@ -375,20 +340,18 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
         states, final_states = [rearrange(t, "... (p n) -> ... p n", n=dstate) for t in [states, final_states]]
         return states, final_states
 
-    world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     if world_size > 1:
-        rank = dist.get_rank()
         if rank == 0:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
         dist.barrier()
         #print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(range(world_size-1),range(1,world_size)):
             #print(f"{rank} - {rank1} - {rank2}")
-            if rank in [rank1,rank2]:
+            if rank in [rank1, rank2]:
                 #print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     final_states = torch.zeros_like(states[:,-1])
-                initial_states = _transfer(final_states, rank1, rank2)
+                initial_states = _transfer(final_states, rank, rank1, rank2)
             if rank == rank2:
                 #print(f"state passing {rank2}")
                 states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
@@ -413,10 +376,11 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
         return out, out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
-def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None, z=None,
+def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, world_size, rank, D=None, z=None,
                                    dt_bias=None, initial_states=None, dfinal_states=None, seq_idx=None, dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
-                                   dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False):
+                                   dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False,
+                                   ):
     #print('chunk_scan_combined_bwd')
     if dout.stride(-1) != 1:
         dout = dout.contiguous()
@@ -471,9 +435,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         states, final_states = [rearrange(t, "... (p n) -> ... p n", n=dstate) for t in [states, final_states]]
         return states, final_states
 
-    world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     if world_size > 1:
-        rank = dist.get_rank()
         if rank == 0:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
         dist.barrier()
@@ -484,11 +446,10 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                 # print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     final_states = torch.zeros_like(states[:, -1])
-                initial_states = _transfer(final_states, rank1, rank2)
+                initial_states = _transfer(final_states, rank, rank1, rank2)
             if rank == rank2:
                 # print(f"state passing {rank2}")
-                states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size,
-                                                               C)
+                states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
             dist.barrier()
         #initial_states = None
     else:
@@ -537,9 +498,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         return states, dstates, dinitial_states, ddA_chunk_cumsum
 
     #Reusue initial states from fwd recalc above, hopefully they haven't been overwritten
-    world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
     if world_size > 1:
-        rank = dist.get_rank()
         if rank == world_size-1:
             states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
         dist.barrier()
@@ -550,7 +509,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                 #print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     dinitial_states = torch.zeros_like(states[:, -1])
-                dfinal_states = _transfer(dinitial_states, rank1, rank2)
+                dfinal_states = _transfer(dinitial_states, rank, rank1, rank2)
             if rank == rank2:
                 #print(f"state passing backward {rank2}")
                 states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates,
@@ -937,10 +896,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
     @custom_fwd(device_type="cuda")
     def forward(ctx, zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states=None, seq_idx=None, dt_limit=(0.0, float("inf")), return_final_states=False, activation="silu",
                 rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None, headdim=None,
-                ngroups=1, norm_before_gate=True, process_group=torch.distributed.group.WORLD):
+                ngroups=1, norm_before_gate=True, rank=0, world_size=1):
         assert activation in [None, "silu", "swish"]
-
-        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
+        lb = 0 if rank == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
         if D.dim() == 1:
             assert headdim is not None
             nheads, = D.shape
@@ -960,7 +918,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
         seqlen -= lb #context parallel
-        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
+        lb = 0 if rank == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
         xBC_conv = rearrange(
             causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
@@ -1015,6 +973,8 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         ctx.chunk_size = chunk_size
         ctx.headdim = headdim
         ctx.ngroups = ngroups
+        ctx.rank = rank
+        ctx.world_size = world_size
         return out if not return_final_states else (out, final_states)
 
     @staticmethod
@@ -1022,6 +982,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
     def backward(ctx, dout, *args):
         zxbcdt, conv1d_weight, conv1d_bias, out, A, D, dt_bias, initial_states, seq_idx, rmsnorm_weight, rstd, outproj_weight, outproj_bias = ctx.saved_tensors
         dfinal_states = args[0] if ctx.return_final_states else None
+        rank, world_size = ctx.rank, ctx.world_size
         headdim = ctx.headdim
         nheads = D.shape[0]
         dim = nheads * headdim
@@ -1035,7 +996,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out0_recompute, out1_recompute = out_recompute.split([d_nonssm, dim], dim=-1)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
-        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
+        lb = 0 if rank == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
         zx0, z, dt = zx0[:,lb:], z[:,lb:], dt[:,lb:] # Context parallel
         #torch.save(z,f'z_{dist.get_rank()}.pt')
         xBC_conv = rearrange(
@@ -1079,22 +1040,12 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         if rmsnorm_weight is None:
             raise Exception("Deleted path here") #This could be added back later but probably needs some testing
         else:
-            #print("rmsnorm_weight")
             batch = dout.shape[0]
             dy_rms = rearrange(dout, "b s h p -> (b s) (h p)") #dout (input)
             dz = rearrange(dz, "b l d -> (b l) d") #dz (copied)
             x_rms = rearrange(out, "b s h p -> (b s) (h p)") #out (calculated)
             z_rms = rearrange(z, "b s h p -> (b s) (h p)") #z (calculated)
-            #torch.save(z, f"z_{dist.get_rank()}.pt") #Good
-            #torch.save(out, f"out_{dist.get_rank()}.pt") #Good
-            #torch.save(dz,f"dz_i_{dist.get_rank()}.pt") #Bad
-            #torch.save(dy_rms,f"dy_rms_{dist.get_rank()}.pt") #Bad
-            #torch.save(x_rms,f"x_rms_{dist.get_rank()}.pt") #Bad
-            #torch.save(dy_rms,f"dy_rms_{dist.get_rank()}.pt")
-            #torch.save(rmsnorm_weight,f"rmsnorm_weight_{dist.get_rank()}.pt")
-            #torch.save(z_rms,f"z_rms_{dist.get_rank()}.pt")
-            #torch.save(rstd,f"rstd_{dist.get_rank()}.pt")
-            #print(z.shape, out.shape, dist.get_rank())
+
             #TODO - dz here doesn't directly write into xdzbcdt so needs to be copied later
             out1_recompute = rearrange(out1_recompute, "b s d -> (b s) d") if recompute_output else None
             dout, drmsnorm_weight, _, dz, *rest = _layer_norm_bwd(dy_rms, x_rms, rmsnorm_weight, None, ctx.rmsnorm_eps,
@@ -1102,9 +1053,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
                                                                   norm_before_gate=ctx.norm_before_gate, is_rms_norm=True,
                                                                   recompute_output=recompute_output, dz=dz,
                                                                   out=out1_recompute if recompute_output else None)
-            #print(f'{dz.shape = }')
-            #torch.save(dz,f"dz_{dist.get_rank()}.pt")
-            #torch.save(dout,f"dout_{dist.get_rank()}.pt")
+
             out_for_linear = out_recompute if recompute_output else None
             dout = rearrange(dout, "(b s) (h p) -> b s h p", b=batch, p=headdim)
             dx, ddt, dA, dB, dC, dD, _, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(
@@ -1151,7 +1100,8 @@ def mamba_split_conv1d_scan_combined(zxbcdt,
                                      dt_bias, A, D, chunk_size, initial_states=None, seq_idx=None, dt_limit=(0.0, float("inf")),
                                      return_final_states=False, activation="silu", rmsnorm_weight=None, rmsnorm_eps=1e-6,
                                      outproj_weight=None, outproj_bias=None, headdim=None, ngroups=1, norm_before_gate=True,
-                                     process_group=None):
+                                     process_group =  torch.distributed.group.WORLD
+                                     ):
     """
     Argument:
         zxbcdt: (batch, seqlen, 2 * dim + 2 * ngroups * dstate + nheads) where dim == nheads * headdim
@@ -1170,7 +1120,8 @@ def mamba_split_conv1d_scan_combined(zxbcdt,
     Return:
         out: (batch, seqlen, dim)
     """
-    return MambaSplitConv1dScanCombinedFn.apply(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states, seq_idx, dt_limit, return_final_states, activation, rmsnorm_weight, rmsnorm_eps, outproj_weight, outproj_bias, headdim, ngroups, norm_before_gate, process_group)
+    rank, world_size = dist.get_rank(group=process_group), dist.get_world_size(group=process_group)
+    return MambaSplitConv1dScanCombinedFn.apply(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states, seq_idx, dt_limit, return_final_states, activation, rmsnorm_weight, rmsnorm_eps, outproj_weight, outproj_bias, headdim, ngroups, norm_before_gate, rank, world_size)
 
 
 def mamba_split_conv1d_scan_ref(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, dt_limit=(0.0, float("inf")), activation="silu", rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None, headdim=None, ngroups=1, norm_before_gate=True):

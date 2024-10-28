@@ -72,6 +72,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         layer_idx=None,  # Absorb kwarg for general module
         process_group=None,
         sequence_parallel=True,
+        context_parallel=True,
         device=None,
         dtype=None,
     ):
@@ -105,8 +106,11 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.context_parallel = context_parallel
 
         if self.context_parallel or self.sequence_parallel and not self.process_group:
+            #TODO clean up process group passes along with world size/local rank here so one source of truth
             assert torch.distributed.is_initialized()
             self.process_group = torch.distributed.group.WORLD
+            self.world_size = torch.distributed.get_world_size()
+            self.local_rank = torch.distributed.get_rank()
 
         if self.context_parallel:
             self.cpmixer = ContextParallelMixerLayer(padding=d_conv - 1, process_group=self.process_group)
