@@ -963,7 +963,6 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out, _, rstd = _layer_norm_fwd(x_rms, rmsnorm_weight, None, rmsnorm_eps, z_rms, out=out,
                                            group_size=dim // ngroups,
                                            norm_before_gate=norm_before_gate, is_rms_norm=True)
-            print(f"after layer norm: {out.shape = }")
             if d_nonssm == 0:
                 out = rearrange(out, "(b s) d -> b s d", b=batch)
             else:
@@ -1136,7 +1135,6 @@ def mamba_split_conv1d_scan_combined(zxbcdt,
     Return:
         out: (batch, seqlen, dim)
     """
-    print('running distributed')
     return MambaSplitConv1dScanCombinedFn.apply(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states,
                                                 seq_idx, dt_limit, return_final_states, activation, rmsnorm_weight, rmsnorm_eps,
                                                 outproj_weight, outproj_bias, headdim, ngroups, norm_before_gate, process_group)
