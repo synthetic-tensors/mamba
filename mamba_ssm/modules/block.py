@@ -55,6 +55,7 @@ class Block(nn.Module):
             if self.residual_in_fp32:
                 residual = residual.to(torch.float32)
         else:
+            torch.save(self.norm.bias,f'norm_bias_{dist.get_rank() if dist.is_initialized() else 0}.pt')
             hidden_states, residual = layer_norm_fn(
                 hidden_states,
                 self.norm.weight,
