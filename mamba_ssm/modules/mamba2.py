@@ -87,13 +87,14 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.expand = expand
         self.process_group = process_group
         self.sequence_parallel = sequence_parallel
-        self.world_size = 1 if process_group is None else process_group.size()
-        self.local_rank = 0 if process_group is None else process_group.rank()
+        #FIXME this is probably for sequence parallel For context parallel we just replace it later - we odn't want to divide innder dimensions by world size since we don't shard that - but we probably could...
+        self.world_size = 1 #if process_group is None else process_group.size()
+        self.local_rank = 0 #if process_group is None else process_group.rank()
         self.d_inner = (self.expand * self.d_model) // self.world_size
         assert self.d_inner * self.world_size == self.expand * self.d_model
         self.headdim = headdim
         self.d_ssm = self.d_inner if d_ssm is None else d_ssm // self.world_size
-        assert ngroups % self.world_size == 0
+        assert ngroups % self.world_size == 0 
         self.ngroups = ngroups // self.world_size
         assert self.d_ssm % self.headdim == 0
         self.nheads = self.d_ssm // self.headdim
@@ -205,7 +206,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
 
         if self.cpmixer: #Context parallel - transfer some tokens to mix in with the conv layer to the next GPU
             u = self.cpmixer(u)
-        zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
+        zxbcdt = self.in_proj(u)
         #torch.save(zxbcdt,f'zxbcdt_{dist.get_rank() if dist.is_initialized() else 0}.pt')
         #torch.save(self.norm.weight,f'norm_weight_{dist.get_rank() if dist.is_initialized() else 0}.pt')
         if seqlen_og is not None:

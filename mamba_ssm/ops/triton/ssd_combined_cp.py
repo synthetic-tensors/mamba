@@ -963,6 +963,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out, _, rstd = _layer_norm_fwd(x_rms, rmsnorm_weight, None, rmsnorm_eps, z_rms, out=out,
                                            group_size=dim // ngroups,
                                            norm_before_gate=norm_before_gate, is_rms_norm=True)
+            print(f"after layer norm: {out.shape = }")
             if d_nonssm == 0:
                 out = rearrange(out, "(b s) d -> b s d", b=batch)
             else:
