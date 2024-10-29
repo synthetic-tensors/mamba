@@ -345,21 +345,21 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
         if rank == 0:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
         dist.barrier()
-        print('passing states sequentially multi-gpu')
+        #print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(range(world_size-1),range(1,world_size)):
-            print(f"{rank} - {rank1} - {rank2}")
+            #print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
-                print(f"transfer {rank1}:{rank2}")
+                #print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     final_states = torch.zeros_like(states[:,-1])
                 initial_states = _transfer(final_states, rank, rank1, rank2, process_group)
             if rank == rank2:
-                print(f"state passing {rank2}")
+                #print(f"state passing {rank2}")
                 states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
             dist.barrier()
     else:
         states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-    print("Done state passing")
+    #print("Done state passing")
     #torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
     #torch.save(states,f"passed_states_{dist.get_rank()}.pt")
     #torch.save(states,f"passed_states_{dist.get_rank()}.pt")
@@ -463,7 +463,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     #torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
 
     if z is not None:
-        print(f"z not none, chunk scan bwd dz, {dist.get_rank()}")
+        #print(f"z not none, chunk scan bwd dz, {dist.get_rank()}")
         dz, dout, dD, *rest = _chunk_scan_bwd_dz(x, z, out, dout, chunk_size=chunk_size, has_ddAcs=False, D=D, dz=dz, recompute_output=recompute_output)
         outz = rest[0] if recompute_output else out
     else:

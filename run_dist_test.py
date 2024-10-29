@@ -69,7 +69,7 @@ for layer_idx in range(num_layers):
     block = Block(
             d_model,
             partial(Mamba2, context_parallel=dist.is_initialized(), sequence_parallel=False),
-            norm_cls=nn.LayerNorm,
+            norm_cls=RMSNorm,
             mlp_cls=nn.Identity,
             fused_add_norm=True,
             #context_parallel=True if dist.is_initialized() else False,
