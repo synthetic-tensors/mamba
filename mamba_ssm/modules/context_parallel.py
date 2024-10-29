@@ -31,17 +31,17 @@ class ContextParallelMixerFn(torch.autograd.Function):
 
         send_to_rank = rank + 1 if rank < world_size - 1 else None
         receive_from_rank = rank - 1 if rank > 0 else None
-        print('dist', rank, 'send',send_to_rank, 'recieve',receive_from_rank)
+        #print('dist', rank, 'send',send_to_rank, 'recieve',receive_from_rank)
         #_, pre_tokens = x.split(x.shape[1]-self.padding, dim=1)
         pre_tokens = x[:,-padding:].contiguous()
-        print('dist',rank,'padding',padding)
+        #print('dist',rank,'padding',padding)
         assert pre_tokens.shape[1] == padding
         receive_buffer = torch.zeros_like(pre_tokens, requires_grad=True).contiguous() #TODO this isn't used by rank=0
         send_and_receive_(pre_tokens, receive_buffer, send_to_rank, receive_from_rank, process_group)
         if rank > 0:
             x = F.pad(x, (0, 0, padding, 0), 'constant', 0)
             x[:, :padding] = receive_buffer
-        print('x', rank, x.shape)
+        #print('x', rank, x.shape)
         ctx.padding=padding
         ctx.process_group = process_group
         return x
