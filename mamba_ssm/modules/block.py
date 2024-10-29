@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 from torch import nn, Tensor
 import torch.nn as nn
-
+import torch.distributed as dist
 from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
 
 class Block(nn.Module):
@@ -48,6 +48,7 @@ class Block(nn.Module):
             hidden_states: the sequence to the encoder layer (required).
             residual: hidden_states = Mixer(LN(residual))
         """
+        torch.save(hidden_states,f'hidden_states_pre_{dist.get_rank() if dist.is_initialized() else 0}.pt')
         if not self.fused_add_norm:
             residual = (hidden_states + residual) if residual is not None else hidden_states
             hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
@@ -64,8 +65,9 @@ class Block(nn.Module):
                 eps=self.norm.eps,
                 is_rms_norm=isinstance(self.norm, RMSNorm)
             )
-
+        torch.save(hidden_states,f'hidden_states_in_{dist.get_rank() if dist.is_initialized() else 0}.pt')
         hidden_states = self.mixer(hidden_states, inference_params=inference_params, **mixer_kwargs)
+        torch.save(hidden_states,f'hidden_states_out_{dist.get_rank() if dist.is_initialized() else 0}.pt')
 
         if self.mlp is not None:
             if not self.fused_add_norm:

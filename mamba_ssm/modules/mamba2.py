@@ -38,6 +38,8 @@ from mamba_ssm.modules.context_parallel import ContextParallelMixerLayer
 from huggingface_hub import PyTorchModelHubMixin
 
 
+import torch.distributed as dist
+
 # Context Parallel - split input sequence
 # Going to want to shard this outside of Mamba2 class, so it can run over multiple layers...
 # auto_shard_seq = not force_ring_reduce_off and self.auto_shard_seq and is_distributed()
@@ -72,7 +74,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         layer_idx=None,  # Absorb kwarg for general module
         process_group=None,
         sequence_parallel=True,
-        context_parallel=True,
+        context_parallel=False,
         device=None,
         dtype=None,
     ):
@@ -105,6 +107,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.layer_idx = layer_idx
         self.context_parallel = context_parallel
 
+        assert not (self.context_parallel and self.sequence_parallel)
         if self.context_parallel or self.sequence_parallel and not self.process_group:
             #TODO clean up process group passes along with world size/local rank here so one source of truth
             assert torch.distributed.is_initialized()
@@ -202,8 +205,10 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
 
         if self.cpmixer: #Context parallel - transfer some tokens to mix in with the conv layer to the next GPU
             u = self.cpmixer(u)
-
+        print(f"{u.shape = }")
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
+        torch.save(zxbcdt,f'zxbcdt_{dist.get_rank() if dist.is_initialized() else 0}.pt')
+        torch.save(self.norm.weight,f'norm_weight_{dist.get_rank() if dist.is_initialized() else 0}.pt')
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
         # If the model is loaded in fp16, without the .float() here, A might be -inf
@@ -298,6 +303,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                     varlen_states = rest[0]
                     ssm_state.copy_(varlen_states)
             y = rearrange(y, "b l h p -> b l (h p)")
+            torch.save(y,f'y_{dist.get_rank() if dist.is_initialized() else 0}.pt')
             if self.rmsnorm:
                 y = self.norm(y, z)
             if d_mlp > 0:

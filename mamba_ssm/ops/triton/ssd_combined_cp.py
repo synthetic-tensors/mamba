@@ -345,21 +345,21 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
         if rank == 0:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
         dist.barrier()
-        #print('passing states sequentially multi-gpu')
+        print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(range(world_size-1),range(1,world_size)):
-            #print(f"{rank} - {rank1} - {rank2}")
+            print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
-                #print(f"transfer {rank1}:{rank2}")
+                print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     final_states = torch.zeros_like(states[:,-1])
                 initial_states = _transfer(final_states, rank, rank1, rank2, process_group)
             if rank == rank2:
-                #print(f"state passing {rank2}")
+                print(f"state passing {rank2}")
                 states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
             dist.barrier()
     else:
         states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-    #print("Done state passing")
+    print("Done state passing")
     #torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
     #torch.save(states,f"passed_states_{dist.get_rank()}.pt")
     #torch.save(states,f"passed_states_{dist.get_rank()}.pt")
@@ -994,8 +994,8 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
     def backward(ctx, dout, *args):
         zxbcdt, conv1d_weight, conv1d_bias, out, A, D, dt_bias, initial_states, seq_idx, rmsnorm_weight, rstd, outproj_weight, outproj_bias = ctx.saved_tensors
         dfinal_states = args[0] if ctx.return_final_states else None
-        rank, world_size = ctx.rank, ctx.world_size
         process_group = ctx.process_group
+        rank, world_size = dist.get_rank(process_group), dist.get_world_size(process_group)
         headdim = ctx.headdim
         nheads = D.shape[0]
         dim = nheads * headdim
@@ -1135,6 +1135,7 @@ def mamba_split_conv1d_scan_combined(zxbcdt,
     Return:
         out: (batch, seqlen, dim)
     """
+    print('running distributed')
     return MambaSplitConv1dScanCombinedFn.apply(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states,
                                                 seq_idx, dt_limit, return_final_states, activation, rmsnorm_weight, rmsnorm_eps,
                                                 outproj_weight, outproj_bias, headdim, ngroups, norm_before_gate, process_group)

@@ -4,7 +4,7 @@ from mamba_ssm import Mamba2
 from mamba_ssm.ops.triton.layer_norm import RMSNorm
 from mamba_ssm.modules.block import Block
 import torch
-
+from functools import partial
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,11 +68,11 @@ layers = []
 for layer_idx in range(num_layers):
     block = Block(
             d_model,
-            Mamba2,
-            norm_cls=RMSNorm,
+            partial(Mamba2, context_parallel=dist.is_initialized(), sequence_parallel=False),
+            norm_cls=nn.LayerNorm,
             mlp_cls=nn.Identity,
             fused_add_norm=True,
-            context_parallel=True if dist.is_initialized() else False,
+            #context_parallel=True if dist.is_initialized() else False,
             #residual_in_fp32,
         )
     block.layer_idx = layer_idx
@@ -81,14 +81,14 @@ model = nn.ModuleList(layers).cuda()
 if rank == 0:
     print(model)
 
-for s in range(12,13):
+for s in range(10, 11):
     length = 2**s
     seq = torch.randn([iterations,batch,length*8,d_model],device='cpu')
-    #torch.save(seq,'seq.pt')
+    torch.save(seq,'seq.pt')
     #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
     assert seq.shape[1]%num_gpus == 0
     seq_per_gpu = seq.shape[2]//num_gpus
-    #print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
+    print('running on ',rank, ' with ', seq_per_gpu)
     #Equal split sequences - easy test
     #sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
@@ -99,15 +99,14 @@ for s in range(12,13):
     for i in range(iterations):
         #input_tensor = sequence[i,rank].cuda()
         #print(f"{sequence[rank].shape = }")
-        input_tensor = sequence[rank][i].cuda().contiguous()
+        batch = sequence[rank][i].clone().cuda().contiguous()
+        torch.save(batch,f'input_{rank}.pt')
         #with torch.autograd.profiler.profile(use_cuda=True) as prof:
         start.record()
-        print(input_tensor.shape)
         residual = None
         for i,layer in enumerate(model):
-            input_tensor,residual = layer(input_tensor,residual)
+            batch,residual = layer(batch,residual)
 #            print(f'{i = } - {dist.get_rank() = } - {input_tensor.shape = }')
-        output=input_tensor
         end.record()
         torch.cuda.synchronize()
         r = torch.cuda.memory_reserved(rank)
@@ -121,7 +120,7 @@ for s in range(12,13):
         model.zero_grad()
         start.record()
         #dist_autograd.backward(context_id, [output[:,-1,:].sum()]) #For RPC only
-        output[0].sum().backward()
+        batch.sum().backward()
         end.record()
         torch.cuda.synchronize()
         r = torch.cuda.memory_reserved(rank)
@@ -134,8 +133,7 @@ for s in range(12,13):
             print("backward",rank,i,t, 'ms')
         if dist.is_initialized() and world_size > 1:
             dist.barrier()
-    torch.save(input_tensor,f'input_{rank}.pt')
-    torch.save(output, f"output_{rank}.pt")
+    torch.save(batch, f"output_{rank}.pt")
     torch.save({x[0]:x[1].grad for x in model.named_parameters()}, f"grad_dict_{rank}.pt")
 pd.DataFrame(res_forward).to_csv(f'res_fw_{rank}.csv')
 pd.DataFrame(res_backward).to_csv(f'res_bw_{rank}.csv')
