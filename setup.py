@@ -232,7 +232,6 @@ if not SKIP_CUDA_BUILD:
                 + cc_flag
             ),
         }
-"""
     ext_modules.append(
         CUDAExtension(
             name="selective_scan_cuda",
@@ -252,7 +251,6 @@ if not SKIP_CUDA_BUILD:
             include_dirs=[Path(this_dir) / "csrc" / "selective_scan"],
         )
     )
-"""
 
 def get_package_version():
     with open(Path(this_dir) / PACKAGE_NAME / "__init__.py", "r") as f:
