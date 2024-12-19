@@ -216,7 +216,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
 
         if self.use_mem_eff_path and inference_params is None:
-            fn = mamba_split_conv1d_scan_combined_cp if torch.distributed.is_initialized() else mamba_split_conv1d_scan_combined
+            fn = mamba_split_conv1d_scan_combined_cp if self.context_parallel else mamba_split_conv1d_scan_combined
             out = fn(
                 zxbcdt,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
